@@ -1,0 +1,423 @@
+---
+title: "PS4-test"
+author: "Siddharth Koppaku"
+date: "4/21/2024"
+output: html_document
+---
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(neuralnet)
+library(randomForest)
+library(broom)
+library(foreach)
+library(doParallel)
+library(microbenchmark)
+library(stats)
+Packages <- c("ggplot2", "dplyr", "stargazer", "glmnet", "leaps", "e1071", "collapse")
+lapply(Packages, library, character.only = TRUE)
+Packages <- c( "data.table", "tictoc")
+lapply(Packages, library, character.only = TRUE)
+```
+
+## 2.1 Drawing variables for Analysis I
+
+```{r get_x_var}
+#Draw observable explanatory variables
+n <- 1000
+x1 = rgamma(n,2,1); x2 = rnorm(n,0,2);
+x3 = rweibull(n,2,2); x4 = rlogis(n,2,1);
+x5 = rbeta(n,2,1);
+x = cbind(x1,x2,x3,x4,x5)
+###############################################
+#transform into independent random variables
+# find the current correlation matrix
+c1 <- var(x)
+# cholesky decomposition to get independence
+chol1 <- solve(chol(c1))
+x <- x %*% chol1
+###############################################
+#generate random correlation matrix
+R <- matrix(runif(ncol(x)^2,-1,1), ncol=ncol(x))
+RtR <- R %*% t(R)
+corr <- cov2cor(RtR)
+# check that it is positive definite
+sum((eigen(corr)$values>0))==ncol(x)
+################################################
+#transform according to this correlation matrix
+x <- x %*% chol(corr)
+datam <- as.data.frame(x)
+datam <- datam %>% dplyr::rename(x1 = V1, x2 = V2, x3 = V3, x4 = V4, x5 = V5)
+```
+
+
+## test run
+```{r test}
+# Set the seed to 0
+set.seed(0)
+
+# calc y var
+specification_1 <- function(data) {
+  formula_1 <- with(data, x1 + x3 * x2^2 / 10 + x4 * x1 * x5 / 10)
+  return(formula_1)
+}
+
+datam <- datam %>%
+  mutate(y = specification_1(.))
+
+# Split the data into training and testing samples
+test_size <- 0.5
+train_indices <- sample(1:nrow(datam), nrow(datam) * (1 - test_size))
+train_data <- datam[train_indices, ]
+test_data <- datam[-train_indices, ]
+
+estimate_models <- function(input_data) {
+  mse_nn <- mse_poly <- mse_rf <- numeric(50)
+  
+  for (i in 1:50) {
+  
+    # Neural Network with 3 hidden layers
+    nn_model <- neuralnet(y ~ ., data = input_data, hidden = c(64, 32, 16))
+  
+    # Polynomial Regression with degree 3
+    poly_model <- lm(y ~ poly(x1, 3) + poly(x2, 3) + poly(x3, 3) + poly(x4, 3) + poly(x5, 3), data = input_data)
+  
+    # Random Forest
+    rf_model <- randomForest(y ~ ., data = input_data, ntree = 1000, mtry = 4)
+  
+      # Make predictions on test data
+      nn_pred <- predict(nn_model, test_data)
+      poly_pred <- predict(poly_model, test_data)
+      rf_pred <- predict(rf_model, test_data)
+      
+      # Calculate MSE for each model
+      print(mean((nn_pred - test_data$y)^2))
+      mse_nn[i] <- mean((nn_pred - test_data$y)^2) 
+      mse_poly[i] <- mean((poly_pred - test_data$y)^2)
+      mse_rf[i] <- mean((rf_pred - test_data$y)^2)
+  }
+  return(list(neural_network = mean(mse_nn), polynomial_regression = mean(mse_poly), random_forest = mean(mse_rf)))
+}
+
+```
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+models_specification_1 <- estimate_models(input_data = train_data)
+```
+
+## output
+```{r output}
+specification_2 <- function(data) {
+  formula_1 <-with(data, log(abs((x1^4)/10) + abs(x2) + x3^2) + x4*x2*sin(x5) + rnorm(1, mean = 0, sd = 1))
+  return(formula_1)
+}
+
+datam <- datam %>%
+  mutate(y = specification_2(.))
+
+test_size <- 0.5
+train_indices <- sample(1:nrow(datam), nrow(datam) * (1 - test_size))
+train_data <- datam[train_indices, ]
+test_data <- datam[-train_indices, ]
+```
+
+
+```{r set1_test}
+models_specification_2 <- estimate_models(input_data = train_data)
+```
+
+
+```{r ProblemSet_2_Data}
+airbnb_data <- read.csv("airbnb_data.csv")
+airbnb_data$X <- NULL
+
+datam_2 <- airbnb_data[complete.cases(airbnb_data[, c("price", "accommodates", "beds", "number_of_reviews", "review_scores_rating")]),]
+datam_2$host_experience <- difftime(as.Date("2023-06-01"), as.Date(datam_2$host_since), units = "days")
+datam_2$host_experience <- as.double(datam_2$host_experience)/365
+datam_2 <- datam_2[complete.cases(datam_2[, c("host_experience")]),]
+
+datam_2$entire_apt <- ifelse(datam_2$room_type == "Entire home/apt", 1, 0)
+
+datam_2$host_is_superhost <- ifelse( (datam_2$host_response_rate >=90 & datam_2$number_of_reviews >=10 & datam_2$review_scores_rating >= 4.8 ), 1, 0)
+
+datam_2 <- datam_2[complete.cases(datam_2[, c("host_is_superhost")]),]
+datam_2 <- datam_2[order(datam_2$id),]
+```
+
+```{r ProblemSet_2_GetVar}
+y2 <- datam_2$price
+covariates <- datam_2[, c("accommodates", "beds", "host_experience", "host_is_superhost", "entire_apt", "number_of_reviews", "review_scores_rating")]
+
+covariates <- covariates %>%
+  mutate(accommodates_2 = accommodates*accommodates,
+         beds_2 = beds*beds,
+         host_experience_2 = host_experience*host_experience,
+         number_of_reviews_2 = number_of_reviews*number_of_reviews,
+         review_scores_rating_2 = review_scores_rating*review_scores_rating)
+
+covariates <- covariates %>%
+  mutate(host_is_superhost_accommodates = accommodates*host_is_superhost,
+         host_is_superhost_beds = beds*host_is_superhost,
+         host_is_superhost_host_experience = host_experience*host_is_superhost,
+         host_is_superhost_number_of_reviews = number_of_reviews*host_is_superhost,
+         host_is_superhost_review_scores_rating = review_scores_rating*host_is_superhost)
+
+covariates <- covariates %>%
+  mutate(entire_apt_accommodates = accommodates*entire_apt,
+         entire_apt_beds = beds*entire_apt,
+         entire_apt_host_experience = host_experience*entire_apt,
+         entire_apt_number_of_reviews = number_of_reviews*entire_apt,
+         entire_apt_review_scores_rating = review_scores_rating*entire_apt)
+
+data_sets_PS2 <-covariates
+data_sets_PS2 <- data_sets_PS2 %>%
+  mutate(price = y2)
+
+
+train_index <- sample(1:nrow(data_sets_PS2), 0.9 * nrow(data_sets_PS2))
+```
+
+
+```{r ProblemSet_2_Analysis}
+# 2. PCA
+pca_result <- prcomp(data_sets_PS2[, 1:22], scale. = TRUE)
+
+# 3. Top 4 PCs
+top_pcs <- pca_result$x[, 1:4]
+top_pcs <- as.data.frame(top_pcs)
+top_pcs <- top_pcs %>%
+  mutate(y = data_sets_PS2$price)
+
+# 4. Individual and Cumulative PVE
+individual_pve <- pca_result$sdev^2
+cumulative_pve <- cumsum(individual_pve) / sum(individual_pve)
+
+train_data <- top_pcs[train_index, ]
+test_data <- top_pcs[-train_index, ]
+
+# (b) Linear Regression with Top 4 PCs
+lm_model <- lm(y ~ ., data = train_data)
+predicted_prices <- predict(lm_model, newdata = test_data)
+```
+
+```{r}
+model.mat <- model.matrix(price ~ (accommodates + beds + host_experience +  number_of_reviews + review_scores_rating)^2 + host_is_superhost + entire_apt +
+                                I(accommodates^2) + I(beds^2) + I(host_experience^2) + I(number_of_reviews^2) + I(review_scores_rating^2), 
+                              data = data_sets_PS2)
+
+ols_df <- as.data.frame(model.mat)
+ols_df$price <- data_sets_PS2$price
+ols_full <- lm(price ~ ., data = ols_df[train_index,])
+    
+ols_full.pred <- predict(ols_full, ols_df[train_index , ])
+result_polly <- mean((ols_full.pred - data_sets_PS2[-train_index,"price"])^2)
+```
+```{r}
+ridge.reg <- glmnet(model.mat[train_index,], data_sets_PS2[train_index, "price"], alpha = 0, thresh = 1e-12)
+lasso.reg <- glmnet(model.mat[train_index,], data_sets_PS2[train_index, "price"], alpha = 1, hresh = 1e-12)
+      
+# Ridge
+ridge.cv <- cv.glmnet(model.mat[train_index, ], data_sets_PS2[train_index, "price"], alpha = 0, nfolds = 10)
+lambda_hat <- ridge.cv$lambda.min
+ridge.cv.pred <- predict(ridge.reg, s = lambda_hat, newx = model.mat[-train_index,])
+result_ridge <- mean((ridge.cv.pred - data_sets_PS2[-train_index,"price"])^2)
+    
+# Lasso
+lasso.cv <- cv.glmnet(model.mat[train_index, ], data_sets_PS2[train_index, "price"], alpha = 1, nfolds = 10)
+lambda_hat <- ridge.cv$lambda.min
+lasso.cv.pred <- predict(lasso.reg, s = lambda_hat, newx = model.mat[-train_index,])
+result_lasso <- mean((lasso.cv.pred - data_sets_PS2[-train_index,"price"])^2)
+```
+
+```{r sup_teset}
+test_mse_lm <- mean((test_data$y - predicted_prices)^2)
+test_mse_lm
+result_ridge
+result_lasso
+result_polly
+```
+
+
+
+```{r PS3_data}
+airbnb_data <- read.csv("airbnb_data.csv")
+airbnb_data$X <- NULL
+
+datam_PS3 <- airbnb_data[complete.cases(airbnb_data[, c("price", "accommodates", "beds", "number_of_reviews", "review_scores_rating")]),]
+datam_PS3$host_experience <- difftime(as.Date("2023-06-01"), as.Date(datam_PS3$host_since), units = "days")
+datam_PS3$host_experience <- as.double(datam_PS3$host_experience)/365
+datam_PS3 <- datam_PS3[complete.cases(datam_PS3[, c("host_experience")]),]
+
+datam_PS3$entire_apt <- ifelse(datam_PS3$room_type == "Entire home/apt", 1, 0)
+
+datam_PS3$host_is_superhost <- ifelse( (datam_PS3$host_response_rate >=90 & datam_PS3$number_of_reviews >=10 & datam_PS3$review_scores_rating >= 4.8 ), 1, 0)
+
+datam_PS3 <- datam_PS3[complete.cases(datam_PS3[, c("host_is_superhost")]),]
+datam_PS3 <- datam_PS3[order(datam_PS3$id),]
+datam_PS3 <- datam_PS3[complete.cases(datam_PS3[, c("host_is_superhost")]),]
+datam_PS3 <- datam_PS3[order(datam_PS3$id),]
+
+# Preliminary data cleaning:
+datam_PS3$host_identity_verified <- ifelse(datam_PS3$host_identity_verified == "t", 1, 0)
+datam_PS3 <- datam_PS3[complete.cases(datam_PS3[, c("review_scores_rating", "review_scores_accuracy", "review_scores_value")]),]
+
+set.seed(0)
+train_PS3 <- sample(1:nrow(datam_PS3), .9*nrow(datam_PS3))
+test_PS3 <- (-train_PS3)  
+y_test_PS3 <- datam_PS3$host_is_superhost[test_PS3]
+data_train_PS3 <- datam_PS3[train_PS3, ]
+
+datam_PS3_subset <- datam_PS3[, c("host_is_superhost", "review_scores_rating", "host_experience", "review_scores_accuracy", "beds", "review_scores_value")]
+
+datam_PS3_subset <- datam_PS3_subset %>%
+  mutate(review_scores_rating_host_experience = review_scores_rating*host_experience,
+         review_scores_rating_review_scores_accuracy = review_scores_rating*review_scores_accuracy,
+         review_scores_rating_beds = review_scores_rating*beds,
+         review_scores_rating_review_scores_value = review_scores_rating*review_scores_value)
+
+datam_PS3_subset <- datam_PS3_subset %>%
+  mutate(host_experience_review_scores_accuracy = host_experience*review_scores_accuracy,
+         host_experience_beds = host_experience*beds,
+         host_experience_review_scores_value = host_experience*review_scores_value)
+
+datam_PS3_subset <- datam_PS3_subset %>%
+  mutate(review_scores_accuracy_beds = review_scores_accuracy*review_scores_value,
+         review_scores_accuracy_review_scores_value = review_scores_accuracy*beds)
+
+datam_PS3_subset <- datam_PS3_subset %>%
+  mutate(beds_review_scores_value = beds*review_scores_value)
+
+datam_PS3_subset <- datam_PS3_subset %>%
+  mutate(review_scores_rating_2 = review_scores_rating*review_scores_rating,
+         host_experience_2 = host_experience*host_experience,
+         review_scores_accuracy_2 = review_scores_accuracy*review_scores_accuracy,
+         beds_2 = beds*beds,
+         review_scores_value_2 = review_scores_value*review_scores_value)
+
+
+```
+
+```{r PS3_randondom}
+rf_model <- randomForest(host_is_superhost ~ ., data = datam_PS3_subset[train_PS3,], ntree = 1000, mtry = 4)
+```
+
+```{r compare_logit_lasso}
+train <- sample(1:nrow(datam_PS3), .9*nrow(datam_PS3))
+test <- (-train)  
+y_test <- datam_PS3$host_is_superhost[test]
+data_train <- datam_PS3[train, ]
+
+x <- model.matrix(host_is_superhost ~  (review_scores_rating + host_experience + review_scores_accuracy + beds + review_scores_value)^2 + 
+                    I(review_scores_rating^2) + I(host_experience^2) + I(review_scores_accuracy^2) + I(beds^2) + I(review_scores_value^2),  data = datam_PS3)
+y <- datam_PS3$host_is_superhost
+lasso.logit <- cv.glmnet(x[train,] , y[train], alpha = 1, family = binomial(link = "logit"))
+lambda_hat <- lasso.logit$lambda.min
+data_train$logit_lasso_pred <- predict(lasso.logit, s = lambda_hat, x[train,], type = "response")
+```
+
+```{r PS3A_compar_results}
+predictions <- predict(rf_model, newdata = datam_PS3_subset[-train_PS3,], type = "response")
+actual_labels <- datam_PS3_subset$host_is_superhost[-train_PS3]
+classification_error <- mean(predictions != actual_labels)
+print(classification_error)
+
+test_lasso_logit <- mean((predict(lasso.logit, s = lambda_hat, x[test, ], type = "response") >= .5) != y_test)
+print(test_lasso_logit)
+```
+
+```{r PS3_Kmeans}
+
+# Extract numeric columns
+datam_PS3_subset$host_is_superhost_numeric <- as.numeric(datam_PS3_subset$host_is_superhost == "t")
+numeric_data <- datam_PS3_subset[train_PS3, sapply(datam_PS3_subset[train_PS3, ], is.numeric)]
+
+# Perform K-means clustering
+kmeans_result <- kmeans(numeric_data, centers = 1000)
+
+# Get cluster assignments for each observation
+cluster_assignments <- kmeans_result$cluster
+
+# Summarize the training data by cluster assignment
+summary_data <- tapply(1:nrow(numeric_data), cluster_assignments, function(idx) {
+  colMeans(numeric_data[idx, , drop = FALSE])
+})
+
+# Convert summary data to a data frame
+summary_data <- as.data.frame((summary_data))
+summary_data <- do.call(rbind, summary_data$`(summary_data)`)
+summary_data <- as.data.frame((summary_data))
+```
+
+
+```{r}
+# Pairwise correlations in the training dataset
+correlation_training <- cor(datam_PS3_subset[train_PS3, c("host_is_superhost_numeric", "review_scores_rating", "host_experience")], use = "pairwise.complete.obs")
+
+# Pairwise correlations in the summary dataset
+correlation_summary <- cor(summary_data[,c("host_is_superhost_numeric", "review_scores_rating", "host_experience")])
+
+# Print correlations
+print("Pairwise correlations in the training dataset:")
+print(correlation_training)
+
+print("Pairwise correlations in the summary dataset:")
+print(correlation_summary)
+
+```
+
+```{r}
+
+set.seed(0)
+train_S <- sample(1:nrow(summary_data), .9 * nrow(summary_data))
+test_S <- (-train_S)
+y_test_S <- summary_data$host_is_superhost[test_S]
+data_train_S <- summary_data[train_S, ]
+
+data_train_S <- summary_data[train_S, c("host_is_superhost", "review_scores_rating", "host_experience")]
+data_train_S$host_is_superhost <- as.factor(ifelse(data_train_S$host_is_superhost == 0, -1, 1))
+
+runtime <- system.time({
+  tune.out <- tune(svm, host_is_superhost ~ ., data = data_train_S, kernel = "radial", scale = TRUE, gamma = 0.01,
+                   ranges = list(cost = c(1, 10, 100, 10^3, 10^4)))
+
+  svm.pred_S <- predict(tune.out$best.model, newdata = summary_data[test_S, c("review_scores_rating", "host_experience")])
+  svm.pred_S <- ifelse(svm.pred_S == -1, 0, 1)
+})
+
+print(runtime)
+
+
+```
+
+```{r}
+set.seed(0)
+train <- sample(1:nrow(datam_PS3_subset), .9*nrow(datam_PS3_subset))
+test <- (-train)  
+y_test <- datam_PS3_subset$host_is_superhost[test]
+data_train <- datam_PS3_subset[train, ]
+
+data_train <- datam_PS3_subset[train, c("host_is_superhost", "review_scores_rating", "host_experience")]
+data_train$host_is_superhost <- as.factor(ifelse(data_train$host_is_superhost == 0, -1, 1))
+
+runtime <- system.time({
+  tune.out <- tune(svm, host_is_superhost ~  ., data = data_train, kernel="radial", scale = TRUE, gamma = 0.01, 
+                   ranges = list(cost = c(1, 10, 100, 10^3, 10^4)))
+
+  svm.pred <- predict(tune.out$best.model, newdata = datam_PS3_subset[test, c("review_scores_rating", "host_experience")])
+  svm.pred <- ifelse(svm.pred == -1 , 0 , 1)
+})
+
+print(runtime)
+```
+
+```{r}
+
+test_svm <- mean(svm.pred != y_test)
+test_svm_S <- mean(svm.pred_S != y_test_S)
+```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
